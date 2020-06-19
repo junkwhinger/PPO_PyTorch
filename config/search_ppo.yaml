@@ -1,0 +1,36 @@
+exp_name: search_ppo
+device: "cpu"
+seed: 77
+env:
+  name: "LunarLander-v2"
+  nS: 8
+  nA: 4
+agent: "PPO"
+model:
+  actor:
+    hidden_dims: [64, 64]
+    hidden_acivation_fn: "tanh"
+    lr: 0.002
+    betas: [0.9, 0.999]
+  critic:
+    hidden_dims: [64, 64]
+    hidden_acivation_fn: "tanh"
+    lr: 0.002
+    betas: [0.9, 0.999]
+
+train:
+  terminal_score: 230
+  max_episodes: 1000
+  max_steps_per_episode: 300
+  gamma: 0.99
+  gae:
+    tau: 0.95
+  ppo:
+    memory_size: 2048
+    batch_size: 32
+    optim_epochs: 4
+    clip_range: 0.2
+    coef_vf: 0.5
+    coef_entpen: 0.001
+  gail: False
+  average_interval: 100
