@@ -170,3 +170,54 @@ class Critic(nn.Module):
             state = torch.tensor(state, device=self.device, dtype=torch.float32)
             state = state.unsqueeze(0)  # add bsz dim if state is in numpy array
         return state
+
+
+class Discriminator(nn.Module):
+    def __init__(self, device, state_dim, action_dim, hidden_dims, hidden_activation_fn, weight_init_scheme="normal"):
+        super(Discriminator, self).__init__()
+
+        self.input_layer = nn.Linear(state_dim+action_dim, hidden_dims[0])
+        self.hidden_layers = nn.ModuleList()
+        for idx in range(len(hidden_dims) - 1):
+            self.hidden_layers.append(nn.Linear(hidden_dims[idx], hidden_dims[idx + 1]))
+        self.output_layer = nn.Linear(hidden_dims[-1], 1)
+
+        if hidden_activation_fn == "tanh":
+            self.hfn = torch.tanh
+        elif hidden_activation_fn == 'relu':
+            self.hfn = torch.relu
+        elif hidden_activation_fn == 'swish':
+            self.hfn = swish
+        else:
+            raise NotImplementedError
+
+        if weight_init_scheme == "normal":
+            self.apply(init_normal_weights)
+        elif weight_init_scheme == "orthogonal":
+            self.apply(init_orthogonal_weights)
+        else:
+            raise ValueError
+
+        self.device = device
+        self.action_dim = action_dim
+
+    def forward(self, state, action):
+        """return logit for being generated (S, A)"""
+        action_tensor_onehot = torch.nn.functional.one_hot(action, self.action_dim).float()
+        state_action = torch.cat([state, action_tensor_onehot], dim=1)
+
+        x = self.input_layer(state_action)
+        x = self.hfn(x)
+
+        for hidden_layer in self.hidden_layers:
+            x = hidden_layer(x)
+            x = self.hfn(x)
+
+        x = self.output_layer(x)
+        return x
+
+    def get_irl_reward(self, state_tensor, action_tensor):
+        logit = self.forward(state_tensor, action_tensor)
+        prob = torch.sigmoid(logit)
+
+        return -torch.log(prob)
