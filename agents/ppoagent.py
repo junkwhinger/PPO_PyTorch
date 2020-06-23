@@ -8,10 +8,11 @@ import torch.nn as nn
 import torch.optim as optim
 
 from agents.base import BaseAgent
-from models import Actor, Critic
+from models import Actor, Critic, Discriminator
 from utils.replay_buffer import PPOMemory
 from utils.stuff import RewardScaler, ObservationScaler
 from torch.utils.tensorboard import SummaryWriter
+from gail import DemoDataset
 
 
 class PPO(BaseAgent):
@@ -43,6 +44,24 @@ class PPO(BaseAgent):
         self.critic_optimizer = optim.Adam(self.critic.parameters(),
                                            lr=self.config['model']['critic']['lr'],
                                            betas=self.config['model']['critic']['betas'])
+
+        # GAIL
+        if self.config['train']['gail']:
+            self.discriminator = Discriminator(device=self.config['device'],
+                                               state_dim=self.config['env']['nS'],
+                                               action_dim=self.config['env']['nA'],
+                                 hidden_dims=self.config['model']['discriminator']['hidden_dims'],
+                                 hidden_activation_fn=self.config['model']['discriminator']['hidden_acivation_fn'],
+                                 weight_init_scheme=weight_init_scheme)
+            self.discriminator_optimizer = optim.Adam(self.discriminator.parameters(),
+                                                      lr=self.config['model']['discriminator']['lr'],
+                                                      betas=self.config['model']['discriminator']['betas'])
+
+            self.expert_dataset = DemoDataset(self.config['train']['gail']['samples_exp_name'],
+                                              self.config['train']['gail']['minimum_score'],
+                                              self.config['train']['gail']['n_samples'],
+                                              self.config['train']['ppo']['memory_size'],
+                                              self.config['train']['gail']['dstep'])
 
         # [EXPERIMENT] - reward scaler: r / rs.std()
         if self.config['experiment']['reward_standardization']:
@@ -82,17 +101,21 @@ class PPO(BaseAgent):
                            tau=self.config['train']['gae']['tau'])
         score_queue = deque(maxlen=self.config['train']['average_interval'])
         length_queue = deque(maxlen=self.config['train']['average_interval'])
+        if self.config['train']['gail']:
+            irl_score_queue = deque(maxlen=self.config['train']['average_interval'])
 
         for episode in trange(1, self.config['train']['max_episodes']+1):
             self.episode = episode
             episode_score = 0
+            if self.config['train']['gail']:
+                irl_episode_score = 0
 
             # reset env
             state = env.reset()
 
             for t in range(1, self.config['train']['max_steps_per_episode']+1):
-                # if self.episode % 100 == 0:
-                #     env.render()
+                if self.episode % 100 == 0:
+                    env.render()
 
                 # [EXPERIMENT] - observation scaler: (ob - ob.mean()) / (ob.std())
                 if self.config['experiment']['observation_normalization']:
@@ -110,6 +133,12 @@ class PPO(BaseAgent):
 
                 # update episode_score
                 episode_score += reward
+
+                # GAIL: get irl_reward
+                if self.config['train']['gail']:
+                    with torch.no_grad():
+                        reward = self.discriminator.get_irl_reward(state_tensor, action_tensor).detach()
+                        irl_episode_score += reward
 
                 # [EXPERIMENT] - reward scaler r / rs.std()
                 if self.config['experiment']['reward_standardization']:
@@ -149,6 +178,8 @@ class PPO(BaseAgent):
                 if done:
                     score_queue.append(episode_score)
                     length_queue.append(t)
+                    if self.config['train']['gail']:
+                        irl_score_queue.append(irl_episode_score)
                     break
 
                 # update state
@@ -159,6 +190,10 @@ class PPO(BaseAgent):
             avg_duration = np.mean(length_queue)
             self.writer.add_scalar("info/score", avg_score, self.episode)
             self.writer.add_scalar("info/duration", avg_duration, self.episode)
+
+            if self.config['train']['gail']:
+                avg_score = np.mean(irl_score_queue)
+                self.writer.add_scalar("info/irl_score", avg_score, self.episode)
 
             if self.episode % 100 == 0:
                 print("{} - score: {:.1f} +-{:.1f} \t duration: {}".format(self.episode, avg_score, std_score, avg_duration))
@@ -176,11 +211,17 @@ class PPO(BaseAgent):
                 if self.config['experiment']['observation_normalization']:
                     self.observation_scaler.save(self.config['exp_name'])
 
+        self.save_weight(self.actor, self.config['exp_name'], "last")
         return self.best_score
 
     # optimize
     def optimize(self):
         data = self.prepare_data(self.memory.get())
+
+        # gail
+        if self.config['train']['gail']:
+            self.optimize_gail(data)
+
         self.optimize_ppo(data)
 
     def prepare_data(self, data):
@@ -190,6 +231,9 @@ class PPO(BaseAgent):
         tdlamret_tensor = torch.tensor(data['tdlamret']).float() # bsz
         advants_tensor = torch.tensor(data['advants']).float() # bsz
         values_tensor = torch.tensor(data['values']).float() # bsz
+
+        # normalize advant a.k.a atarg
+        advants_tensor = (advants_tensor - advants_tensor.mean()) / (advants_tensor.std() + 1e-5)
 
         data_tensor = dict(states=states_tensor, actions=actions_tensor, logpas=logpas_tensor,
                     tdlamret=tdlamret_tensor, advants=advants_tensor, values=values_tensor)
@@ -204,6 +248,62 @@ class PPO(BaseAgent):
         for nb in range(n_batches):
             ind = indices[batch_size * nb : batch_size * (nb+1)]
             yield ob[ind], ac[ind], oldpas[ind], atarg[ind], tdlamret[ind], vpredbefore[ind]
+
+    def optimize_gail(self, data):
+        """
+        https://github.com/openai/baselines/blob/master/baselines/gail/trpo_mpi.py
+        bsz = learner_batch_size // d_step
+        for each ob_batch, ac_batch in learner_dataset:
+            get ob_expert, ac_expert from expert_dataset
+            get learner_logit from D
+            get expert_logit from D
+            get learner loss vs. torch.ones()
+            get expert loss vs. torch.zeros()
+            update D
+        """
+        loss_fn = nn.BCELoss()
+        D_losses = []
+        learner_accuracies = []
+        expert_accuracies = []
+
+        learner_ob = data['states']
+        learner_ac = data['actions']
+        rub = torch.zeros_like(learner_ob) # not doing anything.. just wanted to reuse ppo_iter()
+        learner_iter = self.ppo_iter(self.expert_dataset.batch_size, learner_ob, learner_ac, rub, rub, rub, rub)
+        for learner_ob_b, learner_ac_b, _, _, _, _ in learner_iter:
+            expert_ob_b, expert_ac_b = self.expert_dataset.get_next_batch()
+            if self.config['experiment']['observation_normalization']:
+                expert_ob_b = self.observation_scaler(expert_ob_b, update=False).float()
+
+            learner_logit = self.discriminator.forward(learner_ob_b, learner_ac_b)
+            learner_prob = torch.sigmoid(learner_logit)
+
+            expert_logit = self.discriminator.forward(expert_ob_b, expert_ac_b)
+            expert_prob = torch.sigmoid(expert_logit)
+
+            learner_loss = loss_fn(learner_prob, torch.ones_like(learner_prob))
+            expert_loss = loss_fn(expert_prob, torch.zeros_like(expert_prob))
+
+            loss = learner_loss + expert_loss
+            D_losses.append(loss.item())
+
+            self.discriminator_optimizer.zero_grad()
+            loss.backward()
+            self.discriminator_optimizer.step()
+
+            learner_acc = ((learner_prob >= 0.5).float().mean().item())
+            expert_acc = ((expert_prob < 0.5).float().mean().item())
+
+            learner_accuracies.append(learner_acc)
+            expert_accuracies.append(expert_acc)
+
+        avg_d_loss = np.mean(D_losses)
+        avg_learner_accuracy = np.mean(learner_accuracies)
+        avg_expert_accuracy = np.mean(expert_accuracies)
+
+        self.writer.add_scalar("info/discrim_loss", avg_d_loss, self.episode)
+        self.writer.add_scalars("info/gail_accuracy", {'learner': avg_learner_accuracy,
+                                                       'expert': avg_expert_accuracy}, self.episode)
 
     def optimize_ppo(self, data):
 
@@ -224,9 +324,6 @@ class PPO(BaseAgent):
         atarg = data['advants']
         tdlamret = data['tdlamret']
         vpredbefore = data['values']
-
-        # normalize advant a.k.a atarg
-        atarg = (atarg - atarg.mean()) / (atarg.std() + 1e-5)
 
         # can't be arsed..
         eps = self.config['train']['ppo']['clip_range']

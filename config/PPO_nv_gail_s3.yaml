@@ -1,0 +1,65 @@
+agent: PPO
+device: cpu
+env:
+  nA: 4
+  nS: 8
+  name: LunarLander-v2
+exp_name: PPO_nv_gail_s3
+experiment:
+  clipping_gradient: true
+  observation_normalization: true
+  orthogonal_initialization_and_layer_scaling: true
+  policy_noclip: false
+  reward_clipping: true
+  reward_standardization: true
+  value_clipping: false
+model:
+  actor:
+    betas:
+    - 0.9
+    - 0.999
+    hidden_acivation_fn: tanh
+    hidden_dims:
+    - 64
+    - 64
+    lr: 0.002
+  critic:
+    betas:
+    - 0.9
+    - 0.999
+    hidden_acivation_fn: tanh
+    hidden_dims:
+    - 64
+    - 64
+    lr: 0.002
+  discriminator:
+    betas:
+      - 0.9
+      - 0.999
+    hidden_acivation_fn: tanh
+    hidden_dims:
+      - 100
+      - 100
+    lr: 0.002
+seed: 77
+train:
+  average_interval: 100
+  gae:
+    tau: 0.95
+  gail:
+    ppo_step: 1
+    samples_exp_name: "PPO_M"
+    n_samples: 3
+    minimum_score: 230
+    dstep: 1
+  gamma: 0.99
+  max_episodes: 15000
+  max_steps_per_episode: 300
+  ppo:
+    batch_size: 32
+    clip_range: 0.2
+    coef_entpen: 0.001
+    coef_vf: 0.5
+    memory_size: 2048
+    optim_epochs: 4
+  terminal_score: 230
