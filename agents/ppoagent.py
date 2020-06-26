@@ -12,7 +12,8 @@ from models import Actor, Critic, Discriminator
 from utils.replay_buffer import PPOMemory
 from utils.stuff import RewardScaler, ObservationScaler
 from torch.utils.tensorboard import SummaryWriter
-from gail import DemoDataset
+from gail import get_gail_dataset
+from behaviour_cloning import get_bc_dataset, pretrain
 
 
 class PPO(BaseAgent):
@@ -45,23 +46,17 @@ class PPO(BaseAgent):
                                            lr=self.config['model']['critic']['lr'],
                                            betas=self.config['model']['critic']['betas'])
 
-        # GAIL
         if self.config['train']['gail']:
             self.discriminator = Discriminator(device=self.config['device'],
                                                state_dim=self.config['env']['nS'],
                                                action_dim=self.config['env']['nA'],
-                                 hidden_dims=self.config['model']['discriminator']['hidden_dims'],
-                                 hidden_activation_fn=self.config['model']['discriminator']['hidden_acivation_fn'],
-                                 weight_init_scheme=weight_init_scheme)
+                                               hidden_dims=self.config['model']['discriminator']['hidden_dims'],
+                                               hidden_activation_fn=self.config['model']['discriminator'][
+                                                   'hidden_acivation_fn'],
+                                               weight_init_scheme=weight_init_scheme)
             self.discriminator_optimizer = optim.Adam(self.discriminator.parameters(),
                                                       lr=self.config['model']['discriminator']['lr'],
                                                       betas=self.config['model']['discriminator']['betas'])
-
-            self.expert_dataset = DemoDataset(self.config['train']['gail']['samples_exp_name'],
-                                              self.config['train']['gail']['minimum_score'],
-                                              self.config['train']['gail']['n_samples'],
-                                              self.config['train']['ppo']['memory_size'],
-                                              self.config['train']['gail']['dstep'])
 
         # [EXPERIMENT] - reward scaler: r / rs.std()
         if self.config['experiment']['reward_standardization']:
@@ -90,9 +85,37 @@ class PPO(BaseAgent):
         #       wrapup episode
         #       break
         """
-        self.best_score = 0
         writer_path = os.path.join('experiments', self.config['exp_name'], 'runs')
         self.writer = SummaryWriter(writer_path)
+
+        # Pretrain with BC
+        if self.config['train']['bc']:
+            bc_train_set, bc_valid_set = get_bc_dataset(self.config['train']['bc']['samples_exp_name'],
+                                                        self.config['train']['bc']['minimum_score'],
+                                                        self.config['train']['bc']['batch_size'],
+                                                        self.config['train']['bc']['demo_count'],
+                                                        self.config['train']['bc']['val_size'])
+
+            if self.config['experiment']['observation_normalization']:
+                use_obs_scaler = True
+            else:
+                use_obs_scaler = False
+
+            self.actor = pretrain(self.actor,
+                                  self.config['train']['bc']['lr'],
+                                  self.config['train']['bc']['epochs'],
+                                  bc_train_set, bc_valid_set,
+                                  use_obs_scaler, writer=self.writer)
+
+        # GAIL
+        if self.config['train']['gail']:
+            self.expert_dataset = get_gail_dataset(self.config['train']['gail']['samples_exp_name'],
+                                                   self.config['train']['gail']['minimum_score'],
+                                                   self.config['train']['gail']['n_samples'],
+                                                   self.config['train']['ppo']['memory_size'],
+                                                   self.config['train']['gail']['dstep'])
+
+        self.best_score = 0
 
         # prepare env, memory, stuff
         env = self.init_env(self.config['env']['name'])
@@ -203,7 +226,8 @@ class PPO(BaseAgent):
             #     print("game solved at ep {}".format(self.episode))
             #     self.save_weight(self.actor, self.config['exp_name'], "best")
             #     break
-            if avg_score >= self.best_score:
+            if avg_score >= self.best_score and self.episode >= 200:
+                print("found best model at episode: {}".format(self.episode))
                 self.save_weight(self.actor, self.config['exp_name'], "best")
                 self.best_score = avg_score
 
@@ -439,7 +463,7 @@ class PPO(BaseAgent):
             state = env.reset()
 
             while True:
-                env.render()
+                # env.render()
 
                 # [EXPERIMENT] - observation scaler: (ob - ob.mean()) / (ob.std())
                 if self.config['experiment']['observation_normalization']:
