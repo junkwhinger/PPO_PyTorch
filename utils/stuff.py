@@ -118,10 +118,13 @@ class ObservationScaler:
 
 # ObservationScaler test
 # ob_s = ObservationScaler()
-# for i in range(100):
-#     ob = np.array([1, 8]) * np.abs(i - 50)
+# for i in range(2):
+#     ob = np.array([1, 8]) + np.random.normal(0, 0.5)
+#     print("--", ob)
 #     a = ob_s(ob)
-# print(ob_s(np.array([100, 800]), update=False))
+#
+# print(ob_s.rs.mean(), ob_s.rs.std())
+# print(ob_s(np.array([[1, 8], [1,8]]), update=False))
 # ob_s.save("PPO_M")
 #
 # ob_s2 = ObservationScaler()

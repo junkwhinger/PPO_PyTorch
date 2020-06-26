@@ -4,7 +4,7 @@ env:
   nA: 4
   nS: 8
   name: LunarLander-v2
-exp_name: PPO_M_gail_s3
+exp_name: PPO_M_gail_s3_bc
 experiment:
   clipping_gradient: false
   observation_normalization: false
@@ -47,6 +47,7 @@ train:
   gae:
     tau: 0.95
   gail:
+    ppo_step: 1
     samples_exp_name: "PPO_M"
     n_samples: 3
     minimum_score: 230
@@ -62,4 +63,11 @@ train:
     memory_size: 2048
     optim_epochs: 4
   terminal_score: 230
-
+  bc:
+    samples_exp_name: "PPO_M"
+    minimum_score: 230
+    batch_size: 64
+    demo_count: 200
+    val_size: 0.1
+    lr: 0.002
+    epochs: 3

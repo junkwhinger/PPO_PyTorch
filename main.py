@@ -3,6 +3,7 @@ import argparse
 import yaml
 
 from agents.ppoagent import PPO
+from agents.bcagent import BC
 from utils.stuff import prepare_dir
 
 def main():
